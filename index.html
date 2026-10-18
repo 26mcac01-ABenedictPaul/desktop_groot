@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DeskBuddy Phone Link</title>
+<style>
+  body{font-family:system-ui,sans-serif;background:#0c1929;color:#e8f4fc;max-width:460px;margin:0 auto;padding:16px}
+  h1{color:#5ba3f5;font-size:22px;margin:0 0 4px}
+  .card{background:#12243b;border-radius:12px;padding:12px;margin:12px 0}
+  button{padding:12px;border:0;border-radius:10px;background:#3498db;color:#fff;font-size:15px;width:100%;margin-top:8px}
+  button.alt{background:#2d4a6f}
+  input,select{width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #2d4a6f;background:#1a2d47;color:#e8f4fc;box-sizing:border-box;font-size:15px}
+  #status{font-weight:bold}
+  #log{font-size:12px;color:#8ab4e8;white-space:pre-wrap;max-height:160px;overflow:auto}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#c0392b;margin-right:6px}
+  .dot.on{background:#2ecc71}
+</style>
+</head>
+<body>
+<h1>DeskBuddy phone link</h1>
+<div class="card">
+  <div><span class="dot" id="dot"></span><span id="status">Not connected</span></div>
+  <button onclick="connectBuddy(false)">Connect to DeskBuddy</button>
+  <button class="alt" onclick="connectBuddy(true)">Show all Bluetooth devices</button>
+</div>
+
+<div class="card">
+  <b>Weather location</b>
+  <input id="city" placeholder="City" value="Bengaluru">
+  <button onclick="syncAll()">Sync time and weather now</button>
+  <div id="wx" style="margin-top:8px"></div>
+</div>
+
+<div class="card">
+  <b>Test an emotion</b>
+  <select id="em"></select>
+  <button class="alt" onclick="sendEmotion()">Show on DeskBuddy</button>
+</div>
+
+<div class="card"><b>Log</b><div id="log"></div></div>
+
+<p style="font-size:13px;color:#8ab4e8">
+Keep this page open in Chrome. DeskBuddy keeps its own clock and the last weather between syncs,
+and this page re-sends everything every 10 minutes while connected.
+</p>
+
+<script>
+var NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+var RXC = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+var NAMES = ['Happy','Love','Blush','Shy','Cold','Hot','Snow','Windy','Surprised','Sleepy','Sad','Crying','Wink','Excited','Dizzy','Suspicious','Laugh','Thinking','Music','Cool','Annoyed','Angry','Furious','Grumpy','Idle'];
+var dev = null, rx = null, timer = null, retrying = false;
+
+function $(i){return document.getElementById(i)}
+function log(m){var l=$('log');l.textContent=new Date().toLocaleTimeString()+'  '+m+'\n'+l.textContent}
+function setStatus(m,on){$('status').textContent=m;$('dot').className='dot'+(on?' on':'')}
+function sleep(ms){return new Promise(function(r){setTimeout(r,ms)})}
+
+(function init(){
+  var sel=$('em');
+  NAMES.forEach(function(n,i){var o=document.createElement('option');o.value=i;o.textContent=i+' - '+n;sel.appendChild(o)});
+  var c=localStorage.getItem('db_city'); if(c)$('city').value=c;
+  if(!navigator.bluetooth){setStatus('This browser has no Web Bluetooth. Use Chrome.',false)}
+})();
+
+async function connectBuddy(all){
+  try{
+    var opts = all ? {acceptAllDevices:true,optionalServices:[NUS]}
+                   : {filters:[{namePrefix:'DeskBuddy'}],optionalServices:[NUS]};
+    dev = await navigator.bluetooth.requestDevice(opts);
+    dev.addEventListener('gattserverdisconnected', onDisc);
+    await openLink();
+  }catch(e){log('Connect failed: '+e.message);setStatus('Not connected',false)}
+}
+
+async function openLink(){
+  setStatus('Connecting...',false);
+  var srv = await dev.gatt.connect();
+  var svc = await srv.getPrimaryService(NUS);
+  rx = await svc.getCharacteristic(RXC);
+  setStatus('Connected to '+dev.name,true);
+  log('Connected');
+  await syncAll();
+  clearInterval(timer);
+  timer = setInterval(function(){ if(dev && dev.gatt.connected) syncAll(); }, 10*60*1000);
+}
+
+function onDisc(){
+  setStatus('Disconnected - reconnecting...',false);
+  log('Disconnected');
+  retry();
+}
+
+async function retry(){
+  if(retrying) return;
+  retrying = true;
+  for(var i=0;i<120;i++){
+    try{ await openLink(); retrying=false; return; }
+    catch(e){ await sleep(5000); }
+  }
+  retrying = false;
+  setStatus('Gave up. Press Connect.',false);
+}
+
+async function send(s){
+  if(!rx) throw new Error('not connected');
+  await rx.writeValue(new TextEncoder().encode(s));
+  await sleep(80);
+}
+
+async function getWeather(city){
+  var key='db_geo_'+city.toLowerCase(), geo=localStorage.getItem(key);
+  if(geo){geo=JSON.parse(geo)}
+  else{
+    var g=await fetch('https://geocoding-api.open-meteo.com/v1/search?name='+encodeURIComponent(city)+'&count=1&language=en&format=json').then(function(r){return r.json()});
+    if(!g.results||!g.results.length) throw new Error('City not found');
+    geo={lat:g.results[0].latitude,lon:g.results[0].longitude};
+    localStorage.setItem(key,JSON.stringify(geo));
+  }
+  var url='https://api.open-meteo.com/v1/forecast?latitude='+geo.lat+'&longitude='+geo.lon
+    +'&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m'
+    +'&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=4';
+  return await fetch(url).then(function(r){return r.json()});
+}
+
+async function syncAll(){
+  try{
+    var tz = -new Date().getTimezoneOffset();
+    await send('T,'+Math.floor(Date.now()/1000)+','+tz);
+    log('Time sent');
+
+    var city=$('city').value.trim()||'Bengaluru';
+    localStorage.setItem('db_city',city);
+    var w=await getWeather(city);
+    var c=w.current, d=w.daily;
+    var R=Math.round;
+    await send('W,'+R(c.temperature_2m)+','+R(c.apparent_temperature)+','+R(c.relative_humidity_2m)+','+c.weather_code+','+R(c.wind_speed_10m));
+    await send('R,'+R(d.temperature_2m_max[0])+','+R(d.temperature_2m_min[0]));
+    for(var i=1;i<=3;i++){
+      await send('D,'+i+','+d.weather_code[i]+','+R(d.temperature_2m_max[i]));
+    }
+    $('wx').textContent=city+': '+R(c.temperature_2m)+'\u00B0C (feels '+R(c.apparent_temperature)+'), humidity '+R(c.relative_humidity_2m)+'%, wind '+R(c.wind_speed_10m)+' km/h';
+    log('Weather sent');
+  }catch(e){ log('Sync failed: '+e.message); }
+}
+
+async function sendEmotion(){
+  try{ await send('E,'+$('em').value); log('Emotion sent'); }
+  catch(e){ log('Send failed: '+e.message); }
+}
+</script>
+</body>
+</html>
