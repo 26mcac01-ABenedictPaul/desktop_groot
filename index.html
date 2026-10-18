@@ -15,6 +15,8 @@
   #log{font-size:12px;color:#8ab4e8;white-space:pre-wrap;max-height:160px;overflow:auto}
   .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#c0392b;margin-right:6px}
   .dot.on{background:#2ecc71}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .grid button{margin-top:0;padding:10px}
 </style>
 </head>
 <body>
@@ -26,30 +28,36 @@
 </div>
 
 <div class="card">
-  <b>Weather location</b>
-  <input id="city" placeholder="City" value="Bengaluru">
-  <button onclick="syncAll()">Sync time and weather now</button>
-  <div id="wx" style="margin-top:8px"></div>
+  <b>Send text to the OLED</b>
+  <input id="txt" maxlength="100" placeholder="Type a message..." autocomplete="off">
+  <button onclick="sendText()">Send</button>
 </div>
 
 <div class="card">
-  <b>Test an emotion</b>
-  <select id="em"></select>
-  <button class="alt" onclick="sendEmotion()">Show on DeskBuddy</button>
+  <b>Emotions</b>
+  <div class="grid" style="margin-top:8px">
+    <button class="alt" onclick="cmd('hi')">Hi ovs</button>
+    <button class="alt" onclick="cmd('happy')">Happy</button>
+    <button class="alt" onclick="cmd('love')">Love</button>
+    <button class="alt" onclick="cmd('baby')">Baby</button>
+    <button class="alt" onclick="cmd('yawn')">Yawn</button>
+    <button class="alt" onclick="cmd('sleepy')">Sleepy</button>
+    <button class="alt" onclick="cmd('confused')">Confused</button>
+    <button class="alt" onclick="cmd('angry')">Angry</button>
+  </div>
 </div>
 
 <div class="card"><b>Log</b><div id="log"></div></div>
 
 <p style="font-size:13px;color:#8ab4e8">
-Keep this page open in Chrome. DeskBuddy keeps its own clock and the last weather between syncs,
-and this page re-sends everything every 10 minutes while connected.
+Open this page in Chrome (Android or desktop). It will not work on iPhone.
+It needs HTTPS (GitHub Pages is fine) or localhost.
 </p>
 
 <script>
 var NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 var RXC = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
-var NAMES = ['Happy','Love','Blush','Shy','Cold','Hot','Snow','Windy','Surprised','Sleepy','Sad','Crying','Wink','Excited','Dizzy','Suspicious','Laugh','Thinking','Music','Cool','Annoyed','Angry','Furious','Grumpy','Idle'];
-var dev = null, rx = null, timer = null, retrying = false;
+var dev = null, rx = null, retrying = false;
 
 function $(i){return document.getElementById(i)}
 function log(m){var l=$('log');l.textContent=new Date().toLocaleTimeString()+'  '+m+'\n'+l.textContent}
@@ -57,10 +65,8 @@ function setStatus(m,on){$('status').textContent=m;$('dot').className='dot'+(on?
 function sleep(ms){return new Promise(function(r){setTimeout(r,ms)})}
 
 (function init(){
-  var sel=$('em');
-  NAMES.forEach(function(n,i){var o=document.createElement('option');o.value=i;o.textContent=i+' - '+n;sel.appendChild(o)});
-  var c=localStorage.getItem('db_city'); if(c)$('city').value=c;
   if(!navigator.bluetooth){setStatus('This browser has no Web Bluetooth. Use Chrome.',false)}
+  $('txt').addEventListener('keydown',function(e){if(e.key==='Enter')sendText()});
 })();
 
 async function connectBuddy(all){
@@ -80,9 +86,6 @@ async function openLink(){
   rx = await svc.getCharacteristic(RXC);
   setStatus('Connected to '+dev.name,true);
   log('Connected');
-  await syncAll();
-  clearInterval(timer);
-  timer = setInterval(function(){ if(dev && dev.gatt.connected) syncAll(); }, 10*60*1000);
 }
 
 function onDisc(){
@@ -104,48 +107,20 @@ async function retry(){
 
 async function send(s){
   if(!rx) throw new Error('not connected');
-  await rx.writeValue(new TextEncoder().encode(s));
-  await sleep(80);
+  var data = new TextEncoder().encode(s);
+  if(rx.writeValueWithoutResponse) await rx.writeValueWithoutResponse(data);
+  else await rx.writeValue(data);
 }
 
-async function getWeather(city){
-  var key='db_geo_'+city.toLowerCase(), geo=localStorage.getItem(key);
-  if(geo){geo=JSON.parse(geo)}
-  else{
-    var g=await fetch('https://geocoding-api.open-meteo.com/v1/search?name='+encodeURIComponent(city)+'&count=1&language=en&format=json').then(function(r){return r.json()});
-    if(!g.results||!g.results.length) throw new Error('City not found');
-    geo={lat:g.results[0].latitude,lon:g.results[0].longitude};
-    localStorage.setItem(key,JSON.stringify(geo));
-  }
-  var url='https://api.open-meteo.com/v1/forecast?latitude='+geo.lat+'&longitude='+geo.lon
-    +'&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m'
-    +'&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=4';
-  return await fetch(url).then(function(r){return r.json()});
+async function sendText(){
+  var t = $('txt').value.trim();
+  if(!t) return;
+  try{ await send(t); log('Sent: '+t); $('txt').value=''; }
+  catch(e){ log('Send failed: '+e.message); }
 }
 
-async function syncAll(){
-  try{
-    var tz = -new Date().getTimezoneOffset();
-    await send('T,'+Math.floor(Date.now()/1000)+','+tz);
-    log('Time sent');
-
-    var city=$('city').value.trim()||'Bengaluru';
-    localStorage.setItem('db_city',city);
-    var w=await getWeather(city);
-    var c=w.current, d=w.daily;
-    var R=Math.round;
-    await send('W,'+R(c.temperature_2m)+','+R(c.apparent_temperature)+','+R(c.relative_humidity_2m)+','+c.weather_code+','+R(c.wind_speed_10m));
-    await send('R,'+R(d.temperature_2m_max[0])+','+R(d.temperature_2m_min[0]));
-    for(var i=1;i<=3;i++){
-      await send('D,'+i+','+d.weather_code[i]+','+R(d.temperature_2m_max[i]));
-    }
-    $('wx').textContent=city+': '+R(c.temperature_2m)+'\u00B0C (feels '+R(c.apparent_temperature)+'), humidity '+R(c.relative_humidity_2m)+'%, wind '+R(c.wind_speed_10m)+' km/h';
-    log('Weather sent');
-  }catch(e){ log('Sync failed: '+e.message); }
-}
-
-async function sendEmotion(){
-  try{ await send('E,'+$('em').value); log('Emotion sent'); }
+async function cmd(c){
+  try{ await send('/'+c); log('Emotion: '+c); }
   catch(e){ log('Send failed: '+e.message); }
 }
 </script>
