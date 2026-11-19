@@ -2,18 +2,31 @@
 // DeskBuddy Groot - ESP32-C3 Super Mini + 1.3" SH1106 OLED + touch
 // Bluetooth LE only (no WiFi) so the battery lasts and the link stays up.
 //
-// TOUCH
-//   single tap  : next emotion (20 animated faces, in order)
+// FACE (home screen)
+//   The eyes are always alive: they blink and look left / right by themselves.
+//   single tap  : next emotion (26 animated faces, in order)
 //   double tap  : angry (4 angry faces, in order)
-//   long press  : app menu  ->  Time | Dino game | Temperature | Weather
-//   in menu     : tap = next app, long press = open, double tap = back
-//   in an app   : tap = back to menu, double tap = back to face
-//   in dino     : touch = jump, long press = exit
+//   long press  : APP MENU  ->  Dino | Jet | Music | Text | Time | Temp | Weather
+//
+// APP MENU
+//   tap = next app, long press = open, double tap = back to face
+//
+// APPS
+//   Dino    : touch = jump, hold 1 s = exit
+//   Jet     : space fighter, auto-fire. HOLD = fly up, RELEASE = fly down.
+//             hold 2.5 s = exit (or long press after game over)
+//   Music   : tap = pick button (prev / play / next / vol- / vol+),
+//             long press = press it, double tap = back to menu
+//   Text    : the last message typed on the phone (auto pages if long)
+//   Time / Temp / Weather : tap = back to menu, double tap = back to face
 //
 // PHONE (Bluetooth LE, Nordic UART service)
-//   Open deskbuddy_phone.html in Chrome, press Connect.
-//   It sends the time and the weather, and re-sends every 10 minutes
-//   while connected. The buddy keeps its own clock between syncs.
+//   Open index.html in Chrome (https), press Connect. The page can:
+//   - type text -> shows on the OLED          (M command)
+//   - voice button -> eyes listen/think/talk  (V command)
+//   - music player controlled from the OLED   (A in, P out)
+//   - on-screen touch pad + app buttons       (K / S commands)
+//   - time + weather sync every 10 minutes    (T W R D)
 //
 // Libraries: Adafruit GFX Library, Adafruit SH110X  (BLE is built in)
 // Board: "ESP32C3 Dev Module", USB CDC On Boot: Enabled
@@ -49,8 +62,9 @@ Adafruit_SH1106G display(128, 64, &Wire, -1);
 // ---------------- Constants ----------------
 #define LONG_PRESS_MS 800
 #define DOUBLE_TAP_MS 300
-#define EM_COUNT 20
+#define EM_COUNT 26
 #define AN_COUNT 4
+#define MENU_N 7
 #define EM_HOLD_MS 14000UL
 #define FRAME_MS 30
 
@@ -58,12 +72,13 @@ const int EYE_LX = 36;   // left eye centre x
 const int EYE_RX = 92;   // right eye centre x
 const int CY = 30;   // eye centre y
 
-enum Screen { SCR_FACE, SCR_MENU, SCR_TIME, SCR_DINO, SCR_TEMP, SCR_WEATHER };
+enum Screen { SCR_FACE, SCR_MENU, SCR_TIME, SCR_DINO, SCR_TEMP, SCR_WEATHER, SCR_JET, SCR_MUSIC, SCR_MSG, SCR_VOICE };
 enum Ev { EV_NONE, EV_TAP, EV_DOUBLE, EV_LONG };
 
 enum Emotion {
   E_HAPPY, E_LOVE, E_BLUSH, E_SHY, E_COLD, E_HOT, E_SNOW, E_WINDY, E_SURPRISED, E_SLEEPY,
   E_SAD, E_CRYING, E_WINK, E_EXCITED, E_DIZZY, E_SUSPICIOUS, E_LAUGH, E_THINKING, E_MUSIC, E_COOL,
+  E_STARS, E_ROBOT, E_TIRED, E_EVIL, E_CAT, E_WOW,
   E_ANNOYED, E_ANGRY, E_FURIOUS, E_GRUMPY,
   E_IDLE
 };
@@ -77,6 +92,7 @@ struct DObs {
 const char* EM_NAMES[] = {
   "Happy", "Love", "Blush", "Shy", "Cold", "Hot", "Snow", "Windy", "Surprised", "Sleepy",
   "Sad", "Crying", "Wink", "Excited", "Dizzy", "Suspicious", "Laugh", "Thinking", "Music", "Cool",
+  "Stars", "Robot", "Tired", "Evil", "Cat", "Wow",
   "Annoyed", "Angry", "Furious", "Grumpy", "Idle"
 };
 
@@ -92,7 +108,7 @@ unsigned long lastInteract = 0;
 unsigned long lastFrame = 0;
 float popK = 1.0f;
 int menuSel = 0;
-const char* MENU_NAMES[4] = { "Time", "Dino", "Temp", "Weather" };
+const char* MENU_NAMES[MENU_N] = { "Dino", "Jet", "Music", "Text", "Time", "Temp", "Weather" };
 
 // Time (set by phone)
 bool timeSynced = false;
@@ -116,12 +132,53 @@ unsigned long advAt = 0;
 #define NUS_RX "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 #define NUS_TX "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 
-// Touch
+BLECharacteristic* txChar = nullptr;
+
+// Touch (the phone's on-screen pad acts like the real touch pad)
 bool touchDownEdge = false;
+bool touchHeld = false;
+volatile bool remoteHeld = false;
+unsigned long pressStartG = 0;
 
 // Pending commands from BLE (handled in loop, not in the BLE task)
-String pendingCmd = "";
-volatile bool hasCmd = false;
+#define CMDQ 16
+String cmdQ[CMDQ];
+volatile uint8_t qHead = 0, qTail = 0;
+void qPush(const String& s) {
+  uint8_t n = (qHead + 1) % CMDQ;
+  if (n == qTail) return;
+  cmdQ[qHead] = s;
+  qHead = n;
+}
+bool qPop(String& s) {
+  if (qTail == qHead) return false;
+  s = cmdQ[qTail];
+  qTail = (qTail + 1) % CMDQ;
+  return true;
+}
+
+// Text message typed on the phone
+#define MSG_MAX 240
+#define MSG_LINES 64
+char msgBuf[MSG_MAX + 1] = "";
+int msgLen = 0;
+String msgAcc = "";
+String titleAcc = "";
+unsigned long msgShownAt = 0;
+uint16_t mlStart[MSG_LINES];
+uint8_t mlLen[MSG_LINES];
+int mlCount = 0;
+int msgSize = 1;
+
+// Music (the player lives in the phone page, the OLED is the remote)
+char musTitle[64] = "";
+bool musPlaying = false;
+int musVol = 50;
+int musSel = 1;
+
+// Voice chat state (set by the phone)
+int voiceState = 0;  // 0 off, 1 listening, 2 thinking, 3 speaking
+unsigned long voiceAt = 0, voiceStart = 0;
 
 Preferences prefs;
 
@@ -345,20 +402,42 @@ void drawSpiral(int cx, int cy, float maxR, float phase) {
 // ==================================================
 // The 20 emotions + 4 angry + idle
 // ==================================================
-static int gzx(unsigned long seg) { return (int)((seg * 37UL + 11UL) % 9UL) - 4; }
-static int gzy(unsigned long seg) { return (int)((seg * 53UL + 5UL) % 5UL) - 2; }
-
+// Live idle eyes: glide left / right / centre / up on their own, blink at random
+// (sometimes a double blink), breathe, and the eye on the side being looked at
+// gets slightly wider so it feels like depth.
 void emIdle(unsigned long t) {
-  float bk = blinkK(t);
-  unsigned long seg = t / 2300UL;
-  unsigned long prev = seg > 0 ? seg - 1 : 0;
-  float ph = (float)(t % 2300UL) / 350.0f;
-  if (ph > 1) ph = 1;
-  float dx = gzx(prev) + (gzx(seg) - gzx(prev)) * ph;
-  float dy = gzy(prev) + (gzy(seg) - gzy(prev)) * ph;
+  unsigned long now = millis();
+  static float gx = 0, gy = 0, tgx = 0, tgy = 0;
+  static unsigned long nextLook = 0, nextBlink = 1500, blinkAt = 0;
+  static bool dbl = false;
+
+  if (now >= nextLook) {
+    int r = (int)random(0, 10);
+    if (r < 2) { tgx = 0; tgy = 0; }
+    else if (r < 6) { tgx = -1; tgy = ((int)random(0, 3) - 1) * 0.35f; }
+    else { tgx = 1; tgy = ((int)random(0, 3) - 1) * 0.35f; }
+    if (r == 9) tgy = -0.8f;  // glance up
+    nextLook = now + (unsigned long)random(900, 2700);
+  }
+  gx += (tgx - gx) * 0.2f;
+  gy += (tgy - gy) * 0.2f;
+
+  if (now >= nextBlink) {
+    blinkAt = now;
+    dbl = (random(0, 100) < 18);
+    nextBlink = now + (unsigned long)random(1800, 4800);
+  }
+  float bk = 1.0f;
+  unsigned long bd = now - blinkAt;
+  if (bd < 170UL) bk = 1.0f - 0.93f * sinf(PI * (float)bd / 170.0f);
+  else if (dbl && bd >= 260UL && bd < 430UL) bk = 1.0f - 0.93f * sinf(PI * (float)(bd - 260UL) / 170.0f);
+
   float br = sinf(t / 700.0f) * 1.2f;
-  rrect(EYE_LX + (int)(dx * 1.5f), CY + (int)(dy * 1.5f), 30, (int)((30 + br) * bk), 8);
-  rrect(EYE_RX + (int)(dx * 1.5f), CY + (int)(dy * 1.5f), 30, (int)((30 + br) * bk), 8);
+  int dx = (int)(gx * 13.0f), dy = (int)(gy * 6.0f);
+  int lean = (int)(gx * 3.0f);
+  int h = (int)((30 + br) * bk);
+  rrect(EYE_LX + dx, CY + dy, 30 - lean, h, 8);
+  rrect(EYE_RX + dx, CY + dy, 30 + lean, h, 8);
 }
 
 void emHappy(unsigned long t) {
@@ -741,9 +820,143 @@ void emGrumpy(unsigned long t) {
   }
 }
 
+// ---------------- 6 new faces ----------------
+void drawStar(int cx, int cy, int r, float rot) {
+  int px[10], py[10];
+  for (int i = 0; i < 10; i++) {
+    float a = rot + i * PI / 5.0f - PI / 2.0f;
+    float rr = (i % 2 == 0) ? r : r * 0.45f;
+    px[i] = cx + (int)(cosf(a) * rr);
+    py[i] = cy + (int)(sinf(a) * rr);
+  }
+  for (int i = 0; i < 10; i++) {
+    int j = (i + 1) % 10;
+    display.fillTriangle(cx, cy, px[i], py[i], px[j], py[j], WHITE);
+  }
+}
+
+void emStars(unsigned long t) {
+  float pulse = 1.0f + sinf(t / 160.0f) * 0.12f;
+  int r = (int)(16 * pulse * popK);
+  if (r < 3) r = 3;
+  float rot = sinf(t / 400.0f) * 0.3f;
+  drawStar(EYE_LX, CY - 2, r, rot);
+  drawStar(EYE_RX, CY - 2, r, -rot);
+  mouthSmile(64, 50, 16);
+  int sx[4] = { 8, 120, 40, 90 };
+  int sy[4] = { 12, 14, 3, 5 };
+  for (int i = 0; i < 4; i++) {
+    int m = (int)(((t / 140) + i * 2) % 4);
+    if (m != 0) drawPlus(sx[i], sy[i], m);
+  }
+}
+
+void emRobot(unsigned long t) {
+  float bk = blinkK(t, 3000, 140, 500);
+  int h = (int)(24 * bk);
+  if (h < 3) h = 3;
+  for (int e = 0; e < 2; e++) {
+    int cx = e ? EYE_RX : EYE_LX;
+    display.fillRect(cx - 14, CY - h / 2, 28, h, WHITE);
+    int p = (int)((t / 30) % 48);
+    if (p >= 24) p = 47 - p;
+    display.fillRect(cx - 14 + p, CY - h / 2, 4, h, BLACK);
+  }
+  display.drawLine(64, 0, 64, 5, WHITE);
+  if ((t / 400) % 2 == 0) display.fillCircle(64, 7, 2, WHITE);
+  else display.drawCircle(64, 7, 2, WHITE);
+  for (int i = 0; i < 7; i++) {
+    int bh = 2 + (int)((sinf(t / 90.0f + i * 1.1f) + 1.0f) * 3.0f);
+    display.fillRect(46 + i * 5, 58 - bh, 3, bh, WHITE);
+  }
+}
+
+void emTired(unsigned long t) {
+  float bk = blinkK(t, 5000, 380, 1400);
+  int droop = 10 + (int)(sinf(t / 1100.0f) * 3.0f);
+  for (int e = 0; e < 2; e++) {
+    int cx = e ? EYE_RX : EYE_LX;
+    rrect(cx, CY + 3, 28, (int)(26 * bk), 7);
+    lidFlat(cx, CY + 3, 28, 26, droop);
+    display.drawFastHLine(cx - 9, CY + 19, 18, WHITE);
+    display.drawFastHLine(cx - 6, CY + 21, 12, WHITE);
+  }
+  unsigned long ph = t % 7000UL;
+  if (ph > 4500UL && ph < 6200UL) {
+    int r = 3 + (int)(sinf((ph - 4500UL) * PI / 1700.0f) * 5.0f);
+    display.fillCircle(64, 52, r, WHITE);
+  } else {
+    display.drawFastHLine(58, 52, 12, WHITE);
+  }
+}
+
+void emEvil(unsigned long t) {
+  int sh = (int)(sinf(t / 45.0f) * 1.0f);
+  for (int e = 0; e < 2; e++) {
+    int cx = (e ? EYE_RX : EYE_LX) + sh;
+    rrect(cx, CY + 2, 30, 26, 7);
+    lidSlope(cx, CY + 2, 30, 26, 14, e == 1);
+  }
+  display.fillRoundRect(50, 44, 28, 13, 5, WHITE);
+  display.drawFastHLine(51, 49, 26, BLACK);
+  for (int x = 57; x <= 71; x += 7) display.drawFastVLine(x, 44, 6, BLACK);
+  int w = (int)(sinf(t / 120.0f) * 2.0f);
+  display.fillTriangle(6, 18, 10, 0 + w, 22, 10, WHITE);
+  display.fillTriangle(121, 18, 117, 0 + w, 105, 10, WHITE);
+}
+
+void emCat(unsigned long t) {
+  float bk = blinkK(t, 3400, 170, 900);
+  int look = (int)(sinf(t / 800.0f) * 4.0f);
+  int pw = 3 + (int)((sinf(t / 500.0f) + 1.0f) * 2.0f);
+  for (int e = 0; e < 2; e++) {
+    int cx = e ? EYE_RX : EYE_LX;
+    display.fillCircle(cx, CY, 14, WHITE);
+    display.fillRoundRect(cx - pw / 2 + look, CY - 12, pw, 24, pw / 2, BLACK);
+    if (bk < 0.95f) {
+      int lid = (int)((1.0f - bk) * 28.0f);
+      display.fillRect(cx - 15, CY - 15, 31, lid, BLACK);
+    }
+  }
+  display.fillTriangle(10, 14, 12, 0, 26, 6, WHITE);
+  display.fillTriangle(118, 14, 116, 0, 102, 6, WHITE);
+  display.drawLine(58, 49, 61, 52, WHITE);
+  display.drawLine(61, 52, 64, 49, WHITE);
+  display.drawLine(64, 49, 67, 52, WHITE);
+  display.drawLine(67, 52, 70, 49, WHITE);
+  display.drawLine(46, 50, 30, 47, WHITE);
+  display.drawLine(46, 53, 30, 54, WHITE);
+  display.drawLine(82, 50, 98, 47, WHITE);
+  display.drawLine(82, 53, 98, 54, WHITE);
+}
+
+void emWow(unsigned long t) {
+  int look = (int)(sinf(t / 700.0f) * 4.0f);
+  int lookY = (int)(cosf(t / 900.0f) * 2.0f);
+  int r = (int)(16 * popK);
+  if (r < 3) r = 3;
+  int lift = (int)(sinf(t / 200.0f) * 1.0f);
+  for (int e = 0; e < 2; e++) {
+    int cx = e ? EYE_RX : EYE_LX;
+    display.fillCircle(cx, CY, r, WHITE);
+    display.fillCircle(cx + look, CY + lookY, 7, BLACK);
+    display.fillCircle(cx + look - 2, CY + lookY - 2, 2, WHITE);
+    display.drawLine(cx - 11, 9 + lift, cx + 11, 8 + lift, WHITE);
+  }
+  display.drawCircle(64, 52, 3 + (int)((sinf(t / 260.0f) + 1.0f) * 1.5f), WHITE);
+  drawPlus(8, 52, 2);
+  drawPlus(120, 52, 2);
+}
+
 void drawEmotion(int id, unsigned long t) {
   popK = easeOutBack(t / 240.0f);
   switch (id) {
+    case E_STARS: emStars(t); break;
+    case E_ROBOT: emRobot(t); break;
+    case E_TIRED: emTired(t); break;
+    case E_EVIL: emEvil(t); break;
+    case E_CAT: emCat(t); break;
+    case E_WOW: emWow(t); break;
     case E_HAPPY: emHappy(t); break;
     case E_LOVE: emLove(t); break;
     case E_BLUSH: emBlush(t); break;
@@ -956,6 +1169,258 @@ void drawDinoGame() {
 }
 
 // ==================================================
+// Jet fighter game (one-touch: hold = up, release = down, auto-fire)
+// ==================================================
+#define JET_X 6
+struct JBul { float x; int y; bool on; };
+struct JEn { float x, y, vy; int type, hp; bool on; };
+struct JExp { int x, y, t; };
+JBul jb[6];
+JEn je[5];
+JExp jx[4];
+float jY = 30, jVy = 0, jSpawn = 40, jStarX = 0;
+int jScore = 0, jHi = 0, jLives = 3;
+bool jDead = false;
+unsigned long jLast = 0, jFire = 0, jDeadAt = 0, jInv = 0;
+const int J_EW = 11;
+const int J_EH[3] = { 7, 9, 11 };
+
+void jetReset() {
+  jY = 30;
+  jVy = 0;
+  jScore = 0;
+  jLives = 3;
+  jDead = false;
+  jSpawn = 40;
+  jStarX = 0;
+  jLast = millis();
+  jFire = millis();
+  jInv = 0;
+  for (int i = 0; i < 6; i++) jb[i].on = false;
+  for (int i = 0; i < 5; i++) je[i].on = false;
+  for (int i = 0; i < 4; i++) jx[i].t = 99;
+}
+
+void jetBoom(int x, int y) {
+  for (int i = 0; i < 4; i++) {
+    if (jx[i].t >= 9) {
+      jx[i].x = x;
+      jx[i].y = y;
+      jx[i].t = 0;
+      return;
+    }
+  }
+}
+
+void jetSpawn() {
+  for (int i = 0; i < 5; i++) {
+    if (je[i].on) continue;
+    JEn& e = je[i];
+    int r = (int)random(0, 10);
+    e.type = (r < 5) ? 0 : (r < 8) ? 1 : 2;
+    e.hp = (e.type == 2) ? 3 : 1;
+    e.x = 130;
+    int h = J_EH[e.type];
+    e.y = (float)random(12, 53 - h + 1);
+    e.vy = (e.type == 2) ? ((random(0, 2) ? 0.5f : -0.5f)) : e.y;  // zig: base y, rock: drift
+    e.on = true;
+    return;
+  }
+}
+
+void jetStep() {
+  unsigned long now = millis();
+  if (touchHeld) jVy -= 0.55f;
+  else jVy += 0.45f;
+  if (jVy > 3.4f) jVy = 3.4f;
+  if (jVy < -3.4f) jVy = -3.4f;
+  jY += jVy;
+  if (jY < 11) { jY = 11; if (jVy < 0) jVy = 0; }
+  if (jY > 53) { jY = 53; if (jVy > 0) jVy = 0; }
+
+  float spd = 1.6f + jScore / 400.0f;
+  if (spd > 3.6f) spd = 3.6f;
+  jStarX += spd;
+
+  if (now - jFire >= 260UL) {
+    jFire = now;
+    for (int i = 0; i < 6; i++) {
+      if (!jb[i].on) {
+        jb[i].on = true;
+        jb[i].x = JET_X + 14;
+        jb[i].y = (int)jY + 4;
+        break;
+      }
+    }
+  }
+  for (int i = 0; i < 6; i++) {
+    if (!jb[i].on) continue;
+    jb[i].x += 5;
+    if (jb[i].x > 128) jb[i].on = false;
+  }
+
+  jSpawn -= spd;
+  if (jSpawn <= 0) {
+    jetSpawn();
+    float s = 50.0f + (float)random(0, 40) - jScore / 15.0f;
+    if (s < 20) s = 20;
+    jSpawn = s;
+  }
+
+  for (int i = 0; i < 5; i++) {
+    if (!je[i].on) continue;
+    JEn& e = je[i];
+    if (e.type == 0) e.x -= spd + 0.6f;
+    else if (e.type == 1) {
+      e.x -= spd + 0.2f;
+      e.y = e.vy + sinf(e.x / 11.0f) * 9.0f;
+    } else {
+      e.x -= spd * 0.7f;
+      e.y += e.vy;
+      if (e.y < 11) e.vy = fabsf(e.vy);
+      if (e.y > 51) e.vy = -fabsf(e.vy);
+    }
+    if (e.y < 10) e.y = 10;
+    if (e.y > 53) e.y = 53;
+    if (e.x < -14) e.on = false;
+  }
+
+  // bullets vs enemies
+  for (int b = 0; b < 6; b++) {
+    if (!jb[b].on) continue;
+    for (int i = 0; i < 5; i++) {
+      if (!je[i].on) continue;
+      JEn& e = je[i];
+      int h = J_EH[e.type];
+      if (jb[b].x >= e.x && jb[b].x <= e.x + J_EW && jb[b].y >= (int)e.y && jb[b].y <= (int)e.y + h) {
+        jb[b].on = false;
+        e.hp--;
+        if (e.hp <= 0) {
+          e.on = false;
+          jScore += (e.type == 2) ? 30 : 10;
+          jetBoom((int)e.x + 5, (int)e.y + h / 2);
+        }
+        break;
+      }
+    }
+  }
+
+  // ship vs enemies
+  if (now >= jInv) {
+    int sx0 = JET_X + 1, sx1 = JET_X + 13, sy0 = (int)jY + 1, sy1 = (int)jY + 8;
+    for (int i = 0; i < 5; i++) {
+      if (!je[i].on) continue;
+      JEn& e = je[i];
+      int h = J_EH[e.type];
+      int ex0 = (int)e.x + 1, ex1 = (int)e.x + J_EW - 1, ey0 = (int)e.y + 1, ey1 = (int)e.y + h - 1;
+      if (sx1 > ex0 && sx0 < ex1 && sy1 > ey0 && sy0 < ey1) {
+        e.on = false;
+        jetBoom((int)e.x + 5, (int)e.y + h / 2);
+        jLives--;
+        jInv = now + 1300UL;
+        if (jLives <= 0) {
+          jDead = true;
+          jDeadAt = now;
+          jetBoom(JET_X + 6, (int)jY + 4);
+          if (jScore > jHi) {
+            jHi = jScore;
+            prefs.begin("deskbuddy", false);
+            prefs.putInt("jethi", jHi);
+            prefs.end();
+          }
+          return;
+        }
+        break;
+      }
+    }
+  }
+
+  for (int i = 0; i < 4; i++)
+    if (jx[i].t < 9) jx[i].t++;
+}
+
+void drawJetShip(int x, int y) {
+  display.fillTriangle(x + 14, y + 4, x + 3, y + 1, x + 3, y + 7, WHITE);
+  display.fillTriangle(x + 8, y + 3, x + 2, y - 1, x + 2, y + 3, WHITE);
+  display.fillTriangle(x + 8, y + 5, x + 2, y + 9, x + 2, y + 5, WHITE);
+  display.fillRect(x, y + 3, 3, 3, WHITE);
+  if ((millis() / 60) % 2) display.drawLine(x - 1, y + 4, x - 4, y + 4, WHITE);
+}
+
+void drawJetEnemy(JEn& e) {
+  int x = (int)e.x, y = (int)e.y;
+  if (e.type == 0) {
+    display.fillRoundRect(x, y + 3, 11, 4, 2, WHITE);
+    display.fillRoundRect(x + 3, y, 5, 4, 2, WHITE);
+    display.drawPixel(x + 4, y + 5, BLACK);
+    display.drawPixel(x + 7, y + 5, BLACK);
+  } else if (e.type == 1) {
+    display.fillTriangle(x, y + 4, x + 10, y, x + 10, y + 8, WHITE);
+    display.drawLine(x + 3, y + 4, x + 8, y + 4, BLACK);
+  } else {
+    display.fillCircle(x + 5, y + 5, 5, WHITE);
+    display.drawPixel(x + 3, y + 3, BLACK);
+    display.drawPixel(x + 7, y + 6, BLACK);
+    display.drawPixel(x + 4, y + 7, BLACK);
+    if (e.hp < 3) display.drawLine(x + 2, y + 8, x + 8, y + 2, BLACK);
+  }
+}
+
+void drawJetGame() {
+  unsigned long now = millis();
+  if (!jDead) {
+    int loops = 0;
+    while (now - jLast >= 30UL && loops < 3) {
+      jLast += 30;
+      jetStep();
+      loops++;
+      if (jDead) break;
+    }
+    if (now - jLast > 200UL) jLast = now;
+  }
+  // stars
+  for (int i = 0; i < 14; i++) {
+    int sx = (int)(jStarX * (0.35f + (i % 3) * 0.3f));
+    int x = (((i * 53) % 128) - sx) % 128;
+    if (x < 0) x += 128;
+    display.drawPixel(x, 11 + (i * 29) % 50, WHITE);
+  }
+  // HUD
+  display.setFont(NULL);
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%04d", jScore);
+  display.setCursor(0, 0);
+  display.print(buf);
+  snprintf(buf, sizeof(buf), "HI %04d", jHi);
+  display.setCursor(44, 0);
+  display.print(buf);
+  for (int i = 0; i < jLives; i++) display.fillTriangle(104 + i * 8, 1, 104 + i * 8, 7, 109 + i * 8, 4, WHITE);
+  display.drawFastHLine(0, 9, 128, WHITE);
+
+  for (int i = 0; i < 6; i++)
+    if (jb[i].on) display.fillRect((int)jb[i].x, jb[i].y, 3, 1, WHITE);
+  for (int i = 0; i < 5; i++)
+    if (je[i].on) drawJetEnemy(je[i]);
+  if (!jDead && (now >= jInv || ((now / 70) % 2))) drawJetShip(JET_X, (int)jY);
+  for (int i = 0; i < 4; i++) {
+    if (jx[i].t >= 9) continue;
+    int r = 1 + jx[i].t / 2;
+    display.drawCircle(jx[i].x, jx[i].y, r, WHITE);
+    if (jx[i].t > 1) display.drawCircle(jx[i].x, jx[i].y, r - 1, WHITE);
+  }
+  if (jDead) {
+    display.fillRect(22, 22, 84, 26, BLACK);
+    display.drawRect(22, 22, 84, 26, WHITE);
+    display.setCursor(34, 26);
+    display.print("GAME OVER");
+    display.setCursor(28, 37);
+    display.print("touch = retry");
+  }
+}
+
+// ==================================================
 // App screens
 // ==================================================
 void centerText(const char* s, int y, const GFXfont* f) {
@@ -971,14 +1436,34 @@ void drawMenuIcon(int id, int cx, int cy, uint16_t c) {
   uint16_t e = (c == WHITE) ? BLACK : WHITE;
   switch (id) {
     case 0:
+      drawDino(cx - 6, cy - 8, 0, c, e);
+      break;
+    case 1:
+      display.fillTriangle(cx + 9, cy, cx - 7, cy - 4, cx - 7, cy + 4, c);
+      display.fillTriangle(cx - 1, cy - 3, cx - 7, cy - 9, cx - 4, cy - 3, c);
+      display.fillTriangle(cx - 1, cy + 3, cx - 7, cy + 9, cx - 4, cy + 3, c);
+      break;
+    case 2:
+      display.fillCircle(cx - 5, cy + 6, 3, c);
+      display.fillCircle(cx + 4, cy + 4, 3, c);
+      display.drawFastVLine(cx - 3, cy - 7, 14, c);
+      display.drawFastVLine(cx + 6, cy - 9, 14, c);
+      display.drawLine(cx - 3, cy - 7, cx + 6, cy - 9, c);
+      display.drawLine(cx - 3, cy - 6, cx + 6, cy - 8, c);
+      break;
+    case 3:
+      display.drawRoundRect(cx - 9, cy - 8, 18, 12, 3, c);
+      display.fillTriangle(cx - 4, cy + 3, cx + 1, cy + 3, cx - 5, cy + 8, c);
+      display.fillRect(cx - 5, cy - 3, 2, 2, c);
+      display.fillRect(cx - 1, cy - 3, 2, 2, c);
+      display.fillRect(cx + 3, cy - 3, 2, 2, c);
+      break;
+    case 4:
       display.drawCircle(cx, cy, 9, c);
       display.drawLine(cx, cy, cx, cy - 6, c);
       display.drawLine(cx, cy, cx + 4, cy + 2, c);
       break;
-    case 1:
-      drawDino(cx - 6, cy - 8, 0, c, e);
-      break;
-    case 2:
+    case 5:
       display.drawRoundRect(cx - 3, cy - 10, 7, 15, 3, c);
       display.fillCircle(cx, cy + 7, 4, c);
       display.fillRect(cx - 1, cy - 3, 3, 10, c);
@@ -997,18 +1482,251 @@ void drawMenuIcon(int id, int cx, int cy, uint16_t c) {
 }
 
 void drawMenu() {
-  for (int i = 0; i < 4; i++) {
-    int x = 1 + i * 32;
+  int page = menuSel / 4, first = page * 4;
+  int pages = (MENU_N + 3) / 4;
+  for (int k = 0; k < 4; k++) {
+    int i = first + k;
+    if (i >= MENU_N) break;
+    int x = 1 + k * 32;
     bool sel = (i == menuSel);
     if (sel) display.fillRoundRect(x, 4, 30, 32, 6, WHITE);
     else display.drawRoundRect(x, 4, 30, 32, 6, WHITE);
     drawMenuIcon(i, x + 15, 20, sel ? BLACK : WHITE);
+  }
+  for (int p = 0; p < pages; p++) {
+    int dx = 64 - (pages - 1) * 4 + p * 8;
+    if (p == page) display.fillCircle(dx, 42, 2, WHITE);
+    else display.drawCircle(dx, 42, 2, WHITE);
   }
   display.setTextColor(WHITE);
   centerText(MENU_NAMES[menuSel], 58, &FreeSansBold9pt7b);
   display.setFont(NULL);
   if (bleConnected) display.fillCircle(124, 42, 2, WHITE);
   else display.drawCircle(124, 42, 2, WHITE);
+}
+
+void openApp(int a) {
+  switch (a) {
+    case 0: dinoReset(); screen = SCR_DINO; break;
+    case 1: jetReset(); screen = SCR_JET; break;
+    case 2: musSel = 1; screen = SCR_MUSIC; break;
+    case 3: msgShownAt = millis(); screen = SCR_MSG; break;
+    case 4: screen = SCR_TIME; break;
+    case 5: screen = SCR_TEMP; break;
+    case 6: screen = SCR_WEATHER; break;
+  }
+}
+
+// ==================================================
+// BLE -> phone (notify). Short commands: P,x (music) / V,x (voice cancel)
+// ==================================================
+void sendTx(const char* s) {
+  if (!bleConnected || !txChar) return;
+  txChar->setValue((uint8_t*)s, strlen(s));
+  txChar->notify();
+}
+
+// ==================================================
+// Text message screen
+// ==================================================
+void msgLayout() {
+  msgSize = (msgLen <= 40) ? 2 : 1;
+  int cols = (msgSize == 2) ? 10 : 21;
+  mlCount = 0;
+  int i = 0;
+  while (i < msgLen && mlCount < MSG_LINES) {
+    while (i < msgLen && msgBuf[i] == ' ') i++;
+    if (i >= msgLen) break;
+    int end = i + cols;
+    if (end >= msgLen) end = msgLen;
+    else if (msgBuf[end] != ' ') {
+      int sp = end;
+      while (sp > i && msgBuf[sp] != ' ') sp--;
+      if (sp > i) end = sp;  // else: word longer than a line, hard break
+    }
+    int l = end - i;
+    while (l > 0 && msgBuf[i + l - 1] == ' ') l--;
+    mlStart[mlCount] = i;
+    mlLen[mlCount] = l;
+    mlCount++;
+    i = end;
+  }
+  if (mlCount == 0) {
+    mlStart[0] = 0;
+    mlLen[0] = 0;
+    mlCount = 1;
+  }
+}
+
+void msgShow() {
+  strncpy(msgBuf, msgAcc.c_str(), MSG_MAX);
+  msgBuf[MSG_MAX] = 0;
+  msgLen = strlen(msgBuf);
+  msgLayout();
+  msgShownAt = millis();
+  lastInteract = millis();
+  screen = SCR_MSG;
+}
+
+void drawMsgScreen() {
+  display.setTextColor(WHITE);
+  display.setFont(NULL);
+  if (msgLen == 0) {
+    centerText("No message yet", 28, &FreeSansBold9pt7b);
+    display.setFont(NULL);
+    display.setCursor(4, 40);
+    display.print("Type one on the phone");
+    return;
+  }
+  int rows = (msgSize == 2) ? 4 : 8;
+  int lh = (msgSize == 2) ? 16 : 8;
+  int pages = (mlCount + rows - 1) / rows;
+  int page = 0;
+  if (pages > 1) page = (int)(((millis() - msgShownAt) / 3500UL) % (unsigned long)pages);
+  int first = page * rows;
+  int n = mlCount - first;
+  if (n > rows) n = rows;
+  int y0 = (pages == 1) ? (64 - n * lh) / 2 : 0;
+  display.setTextSize(msgSize);
+  for (int r = 0; r < n; r++) {
+    int li = first + r;
+    int l = mlLen[li];
+    int x = (pages == 1 && msgSize == 2) ? (128 - l * 12) / 2 : 0;
+    display.setCursor(x, y0 + r * lh);
+    for (int k = 0; k < l; k++) display.write(msgBuf[mlStart[li] + k]);
+  }
+  display.setTextSize(1);
+  if (pages > 1) {
+    for (int p = 0; p < pages; p++) {
+      if (p == page) display.fillRect(126, 2 + p * 5, 2, 3, WHITE);
+      else display.drawPixel(127, 3 + p * 5, WHITE);
+    }
+  }
+}
+
+// ==================================================
+// Music remote screen
+// ==================================================
+void drawMusIcon(int id, int cx, int cy, uint16_t c) {
+  switch (id) {
+    case 0:
+      display.fillRect(cx - 5, cy - 4, 2, 9, c);
+      display.fillTriangle(cx + 4, cy - 4, cx + 4, cy + 4, cx - 3, cy, c);
+      break;
+    case 1:
+      if (musPlaying) {
+        display.fillRect(cx - 4, cy - 4, 3, 9, c);
+        display.fillRect(cx + 2, cy - 4, 3, 9, c);
+      } else {
+        display.fillTriangle(cx - 3, cy - 5, cx - 3, cy + 5, cx + 5, cy, c);
+      }
+      break;
+    case 2:
+      display.fillRect(cx + 4, cy - 4, 2, 9, c);
+      display.fillTriangle(cx - 4, cy - 4, cx - 4, cy + 4, cx + 3, cy, c);
+      break;
+    default:
+      display.setTextColor(c);
+      display.setCursor(cx - 6, cy - 3);
+      display.print(id == 3 ? "V-" : "V+");
+      display.setTextColor(WHITE);
+      break;
+  }
+}
+
+void drawMusicScreen() {
+  unsigned long t = millis();
+  display.setFont(NULL);
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  const char* ttl = musTitle[0] ? musTitle : (bleConnected ? "Pick songs on the phone" : "Phone not linked");
+  int tl = (int)strlen(ttl);
+  if (tl <= 21) {
+    display.setCursor((128 - tl * 6) / 2, 0);
+    display.print(ttl);
+  } else {
+    int span = tl * 6 + 24;
+    int off = (int)((t / 45) % (unsigned long)span);
+    display.setCursor(-off, 0);
+    display.print(ttl);
+    display.setCursor(span - off, 0);
+    display.print(ttl);
+  }
+  for (int i = 0; i < 16; i++) {
+    int h = 2;
+    if (musPlaying) h = 3 + (int)((sinf(t / 130.0f + i * 0.9f) + sinf(t / 210.0f + i * 1.7f) + 2.0f) * 5.0f);
+    display.fillRect(i * 8 + 1, 36 - h, 6, h, WHITE);
+  }
+  display.drawRect(0, 39, 128, 4, WHITE);
+  display.fillRect(2, 40, (124 * musVol) / 100, 2, WHITE);
+  for (int i = 0; i < 5; i++) {
+    int x = 4 + i * 24;
+    bool sel = (i == musSel);
+    if (sel) display.fillRoundRect(x, 46, 22, 18, 4, WHITE);
+    else display.drawRoundRect(x, 46, 22, 18, 4, WHITE);
+    drawMusIcon(i, x + 11, 55, sel ? BLACK : WHITE);
+  }
+}
+
+void musicAct(int a) {
+  switch (a) {
+    case 0: sendTx("P,b"); break;
+    case 1:
+      musPlaying = !musPlaying;
+      sendTx("P,p");
+      break;
+    case 2: sendTx("P,n"); break;
+    case 3:
+      musVol = max(0, musVol - 10);
+      sendTx("P,-");
+      break;
+    case 4:
+      musVol = min(100, musVol + 10);
+      sendTx("P,+");
+      break;
+  }
+}
+
+// ==================================================
+// Voice chat screen: listening / thinking / speaking
+// ==================================================
+void drawVoiceScreen() {
+  unsigned long t = millis() - voiceStart;
+  popK = easeOutBack(t / 240.0f);
+  if (voiceState == 1) {
+    float lv = 0.5f + 0.5f * sinf(t / 90.0f) * sinf(t / 53.0f + 1.0f);
+    int eh = 28 + (int)(lv * 8.0f);
+    rrect(EYE_LX, CY, 28, eh, 8);
+    rrect(EYE_RX, CY, 28, eh, 8);
+    for (int k = 0; k < 3; k++) {
+      int h = 4 + (int)((sinf(t / 70.0f + k * 1.3f) + 1.0f) * 7.0f);
+      display.fillRect(2 + k * 6, CY - h / 2, 4, h, WHITE);
+      display.fillRect(110 + k * 6, CY - h / 2, 4, h, WHITE);
+    }
+    int py = 56;
+    for (int x = 40; x <= 88; x += 4) {
+      int y = 56 + (int)(sinf(x / 5.0f + t / 90.0f) * (1.0f + lv * 4.0f));
+      if (x > 40) display.drawLine(x - 4, py, x, y, WHITE);
+      py = y;
+    }
+  } else if (voiceState == 2) {
+    popK = 1.0f;
+    emThinking(t);
+  } else {
+    float lv = fabsf(sinf(t / 70.0f) * sinf(t / 41.0f + 0.7f));
+    int bob = (int)(sinf(t / 160.0f) * 2.0f);
+    float bk = blinkK(t, 2600, 150, 500);
+    rrect(EYE_LX, CY - 4 + bob, 26, (int)(24 * bk), 8);
+    rrect(EYE_RX, CY - 4 + bob, 26, (int)(24 * bk), 8);
+    int mh = 3 + (int)(lv * 11.0f);
+    display.fillRoundRect(64 - 9, 46 + bob, 18, mh, 4, WHITE);
+    for (int k = 0; k < 2; k++) {
+      int r = 4 + (int)((t / 40 + k * 6) % 12);
+      display.drawCircle(8, 54, r, WHITE);
+      display.drawCircle(120, 54, r, WHITE);
+    }
+  }
+  popK = 1.0f;
 }
 
 void drawTimeScreen() {
@@ -1143,12 +1861,14 @@ Ev pollTouch() {
   static bool longDone = false;
   static int taps = 0;
   touchDownEdge = false;
-  bool p = digitalRead(TOUCH_PIN);
+  bool p = digitalRead(TOUCH_PIN) || remoteHeld;
+  touchHeld = p;
   unsigned long now = millis();
   Ev ev = EV_NONE;
 
   if (p && !last) {
     pressStart = now;
+    pressStartG = now;
     longDone = false;
     touchDownEdge = true;
   } else if (p && last) {
@@ -1181,6 +1901,23 @@ void handleEvent(Ev ev) {
     if (ev == EV_LONG) screen = SCR_MENU;
     return;
   }
+  if (screen == SCR_JET) {
+    // holding = fly up, so a normal long press must NOT exit while alive
+    // (exit = hold 2.5 s, handled in loop; or long press after game over)
+    if (jDead) {
+      if (touchDownEdge && millis() - jDeadAt > 500UL) jetReset();
+      if (ev == EV_LONG) screen = SCR_MENU;
+    }
+    return;
+  }
+  if (screen == SCR_VOICE) {
+    if (ev == EV_LONG || ev == EV_DOUBLE) {  // cancel from the buddy
+      voiceState = 0;
+      screen = SCR_FACE;
+      sendTx("V,x");
+    }
+    return;
+  }
   if (ev == EV_NONE) return;
 
   switch (screen) {
@@ -1190,18 +1927,16 @@ void handleEvent(Ev ev) {
       else if (ev == EV_LONG) screen = SCR_MENU;
       break;
     case SCR_MENU:
-      if (ev == EV_TAP) menuSel = (menuSel + 1) % 4;
+      if (ev == EV_TAP) menuSel = (menuSel + 1) % MENU_N;
       else if (ev == EV_DOUBLE) screen = SCR_FACE;
-      else if (ev == EV_LONG) {
-        if (menuSel == 0) screen = SCR_TIME;
-        else if (menuSel == 1) {
-          dinoReset();
-          screen = SCR_DINO;
-        } else if (menuSel == 2) screen = SCR_TEMP;
-        else screen = SCR_WEATHER;
-      }
+      else if (ev == EV_LONG) openApp(menuSel);
       break;
-    default:  // time, temp, weather
+    case SCR_MUSIC:
+      if (ev == EV_TAP) musSel = (musSel + 1) % 5;
+      else if (ev == EV_LONG) musicAct(musSel);
+      else if (ev == EV_DOUBLE) screen = SCR_MENU;
+      break;
+    default:  // time, temp, weather, text
       if (ev == EV_DOUBLE) screen = SCR_FACE;
       else screen = SCR_MENU;
       break;
@@ -1215,6 +1950,7 @@ class ServerCb : public BLEServerCallbacks {
   void onConnect(BLEServer*) { bleConnected = true; }
   void onDisconnect(BLEServer*) {
     bleConnected = false;
+    remoteHeld = false;
     needAdv = true;
     advAt = millis() + 400;
   }
@@ -1224,10 +1960,7 @@ class RxCb : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* c) {
     auto v = c->getValue();
     String s = String(v.c_str());
-    if (!hasCmd) {
-      pendingCmd = s;
-      hasCmd = true;
-    }
+    qPush(s);
   }
 };
 
@@ -1240,6 +1973,7 @@ void bleInit() {
   rx->setCallbacks(new RxCb());
   BLECharacteristic* tx = svc->createCharacteristic(NUS_TX, BLECharacteristic::PROPERTY_NOTIFY);
   tx->addDescriptor(new BLE2902());
+  txChar = tx;
   svc->start();
   BLEAdvertising* adv = BLEDevice::getAdvertising();
   adv->addServiceUUID(NUS_SERVICE);
@@ -1252,12 +1986,87 @@ void bleInit() {
 //   W,<temp>,<feels>,<hum>,<code>,<wind>
 //   R,<hi>,<lo>
 //   D,<1..3>,<code>,<tempMax>    forecast day
-//   E,<0..24>                    show emotion
+//   E,<0..30>                    show emotion
+//   M0,<chunk> M1,<chunk> M2     text message (start / more / show)
+//   N0,<chunk> N1,<chunk> N2     now-playing title (same chunking)
+//   A,<playing 0/1>,<vol 0..100> music state
+//   V,<0..3>                     voice: 0 off, 1 listening, 2 thinking, 3 speaking
+//   K,<0/1>                      remote touch pad up / down
+//   S,<n>                        open app 0..6, 10 = menu, 11 = face
+// Buddy -> phone (notify):  P,p P,n P,b P,+ P,-  (music)   V,x (cancel voice)
+
+void setVoice(int n) {
+  if (n <= 0) {
+    voiceState = 0;
+    if (screen == SCR_VOICE) {
+      screen = SCR_FACE;
+      setEmotion(E_HAPPY, false);
+    }
+    return;
+  }
+  if (n > 3) n = 3;
+  if (n != voiceState || screen != SCR_VOICE) {
+    voiceState = n;
+    voiceStart = millis();
+  }
+  screen = SCR_VOICE;
+  voiceAt = millis();
+  lastInteract = millis();
+}
+
+// raw (untrimmed) chunk command: kind = 'M' or 'N'
+void chunkCmd(char kind, const char* c, int len) {
+  String& acc = (kind == 'M') ? msgAcc : titleAcc;
+  unsigned int lim = (kind == 'M') ? MSG_MAX : 63;
+  char op = c[1];
+  if (op == '0') acc = "";
+  if (op == '0' || op == '1') {
+    if (len > 3 && c[2] == ',') {
+      for (int i = 3; i < len; i++) {
+        char ch = c[i];
+        if (ch == '\r' || ch == '\n') continue;
+        if (acc.length() < lim) acc += (char)((ch >= 32 && ch <= 126) ? ch : '?');
+      }
+    }
+  } else if (op == '2') {
+    if (kind == 'M') {
+      msgShow();
+    } else {
+      strncpy(musTitle, titleAcc.c_str(), 63);
+      musTitle[63] = 0;
+    }
+  }
+}
+
 void handleCommand(String s) {
+  if (s.length() >= 2 && (s[0] == 'M' || s[0] == 'N')) {
+    chunkCmd(s[0], s.c_str(), (int)s.length());
+    return;
+  }
   s.trim();
   if (s.length() < 2) return;
   const char* c = s.c_str();
-  if (c[0] == 'T') {
+  if (c[0] == 'A') {
+    int p, v;
+    if (sscanf(c, "A,%d,%d", &p, &v) == 2) {
+      musPlaying = (p != 0);
+      musVol = constrain(v, 0, 100);
+    }
+  } else if (c[0] == 'V') {
+    int n;
+    if (sscanf(c, "V,%d", &n) == 1) setVoice(n);
+  } else if (c[0] == 'K') {
+    int n;
+    if (sscanf(c, "K,%d", &n) == 1) remoteHeld = (n != 0);
+  } else if (c[0] == 'S') {
+    int n;
+    if (sscanf(c, "S,%d", &n) == 1) {
+      lastInteract = millis();
+      if (n >= 0 && n < MENU_N) openApp(n);
+      else if (n == 10) screen = SCR_MENU;
+      else if (n == 11) screen = SCR_FACE;
+    }
+  } else if (c[0] == 'T') {
     long ep = 0;
     int tz = 0;
     if (sscanf(c, "T,%ld,%d", &ep, &tz) == 2 && ep > 1600000000L) {
@@ -1310,8 +2119,11 @@ void setup() {
   display.begin(0x3C, true);
   display.setTextColor(WHITE);
 
+  display.setTextWrap(false);
+
   prefs.begin("deskbuddy", true);
   dHi = prefs.getInt("dinohi", 0);
+  jHi = prefs.getInt("jethi", 0);
   prefs.end();
 
   display.clearDisplay();
@@ -1328,10 +2140,18 @@ void loop() {
   Ev ev = pollTouch();
   handleEvent(ev);
 
-  if (hasCmd) {
-    String c = pendingCmd;
-    hasCmd = false;
-    handleCommand(c);
+  String cmd;
+  while (qPop(cmd)) handleCommand(cmd);
+
+  // jet: holding the pad 2.5 s exits (a normal hold means "fly up")
+  if (screen == SCR_JET && touchHeld && !jDead && now - pressStartG > 2500UL) {
+    screen = SCR_MENU;
+    pressStartG = now + 100000UL;
+  }
+  // voice screen safety: leave if the phone vanished or went silent
+  if (screen == SCR_VOICE && (!bleConnected || now - voiceAt > 30000UL)) {
+    voiceState = 0;
+    screen = SCR_FACE;
   }
 
   if (needAdv && now > advAt) {
@@ -1351,8 +2171,9 @@ void loop() {
   if (screen == SCR_FACE && curEm != E_IDLE && now - emStart > EM_HOLD_MS && now - lastInteract > EM_HOLD_MS) {
     setEmotion(E_IDLE, false);
   }
-  if ((screen == SCR_MENU || screen == SCR_TIME || screen == SCR_TEMP || screen == SCR_WEATHER) && now - lastInteract > 45000UL) {
-    screen = SCR_FACE;
+  if (screen == SCR_MENU || screen == SCR_TIME || screen == SCR_TEMP || screen == SCR_WEATHER || screen == SCR_MSG || screen == SCR_MUSIC) {
+    unsigned long lim = (screen == SCR_MSG) ? 90000UL : (screen == SCR_MUSIC) ? 120000UL : 45000UL;
+    if (now - lastInteract > lim) screen = SCR_FACE;
   }
 
   if (now - lastFrame < FRAME_MS) return;
@@ -1372,6 +2193,10 @@ void loop() {
     case SCR_DINO: drawDinoGame(); break;
     case SCR_TEMP: drawTempScreen(); break;
     case SCR_WEATHER: drawWeatherScreen(); break;
+    case SCR_JET: drawJetGame(); break;
+    case SCR_MUSIC: drawMusicScreen(); break;
+    case SCR_MSG: drawMsgScreen(); break;
+    case SCR_VOICE: drawVoiceScreen(); break;
   }
   display.display();
 }

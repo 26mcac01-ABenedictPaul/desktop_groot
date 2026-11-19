@@ -3,22 +3,52 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0c1929">
 <title>DeskBuddy Phone Link</title>
 <style>
+  *{-webkit-tap-highlight-color:transparent}
   body{font-family:system-ui,sans-serif;background:#0c1929;color:#e8f4fc;max-width:460px;margin:0 auto;padding:16px}
   h1{color:#5ba3f5;font-size:22px;margin:0 0 4px}
+  h2{font-size:15px;margin:0 0 6px;color:#9cc7f5}
   .card{background:#12243b;border-radius:12px;padding:12px;margin:12px 0}
-  button{padding:12px;border:0;border-radius:10px;background:#3498db;color:#fff;font-size:15px;width:100%;margin-top:8px}
+  button{padding:12px;border:0;border-radius:10px;background:#3498db;color:#fff;font-size:15px;width:100%;margin-top:8px;touch-action:manipulation}
   button.alt{background:#2d4a6f}
-  input,select{width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #2d4a6f;background:#1a2d47;color:#e8f4fc;box-sizing:border-box;font-size:15px}
+  button:active{filter:brightness(1.2)}
+  input,select,textarea{width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #2d4a6f;background:#1a2d47;color:#e8f4fc;box-sizing:border-box;font-size:15px;font-family:inherit}
+  textarea{min-height:84px;resize:vertical}
+  label.chk{display:flex;align-items:center;gap:8px;font-size:14px;margin:6px 0;color:#c8def5}
+  label.chk input{width:auto;margin:0}
   #status{font-weight:bold}
   #log{font-size:12px;color:#8ab4e8;white-space:pre-wrap;max-height:160px;overflow:auto}
   .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#c0392b;margin-right:6px}
   .dot.on{background:#2ecc71}
+  .row{display:flex;gap:8px}
+  .row>*{flex:1}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .grid button{margin:0;padding:10px 4px;font-size:14px}
+  .small{font-size:12px;color:#8ab4e8}
+  /* voice */
+  #mic{width:110px;height:110px;border-radius:50%;margin:10px auto;display:block;font-size:40px;padding:0;background:#3498db;position:relative}
+  #mic.l{background:#e67e22;animation:pulse 1s infinite}
+  #mic.t{background:#8e44ad;animation:spin 1.2s linear infinite}
+  #mic.s{background:#27ae60;animation:pulse .5s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,255,255,.45)}100%{box-shadow:0 0 0 24px rgba(255,255,255,0)}}
+  @keyframes spin{0%{box-shadow:0 0 0 6px rgba(255,255,255,.25)}50%{box-shadow:0 0 0 14px rgba(255,255,255,.05)}100%{box-shadow:0 0 0 6px rgba(255,255,255,.25)}}
+  #vstate{text-align:center;font-weight:bold;min-height:20px}
+  #heard,#reply{font-size:14px;min-height:18px;margin-top:4px}
+  #heard{color:#8ab4e8}
+  /* pad */
+  #pad{height:110px;border-radius:14px;background:#1d3a5c;display:flex;align-items:center;justify-content:center;font-weight:bold;letter-spacing:2px;user-select:none;-webkit-user-select:none;touch-action:none;margin-bottom:10px}
+  #pad.down{background:#3498db}
+  #tracks{font-size:14px;max-height:120px;overflow:auto;margin-top:6px}
+  #tracks div{padding:4px 2px;border-bottom:1px solid #1d3a5c}
+  #tracks div.cur{color:#5ba3f5;font-weight:bold}
+  input[type=range]{padding:0}
 </style>
 </head>
 <body>
 <h1>DeskBuddy phone link</h1>
+
 <div class="card">
   <div><span class="dot" id="dot"></span><span id="status">Not connected</span></div>
   <button onclick="connectBuddy(false)">Connect to DeskBuddy</button>
@@ -26,21 +56,79 @@
 </div>
 
 <div class="card">
-  <b>Weather location</b>
+  <h2>Type a message for the OLED</h2>
+  <textarea id="msg" maxlength="240" placeholder="Type here... (A-Z, numbers and symbols show on the screen)"></textarea>
+  <label class="chk"><input type="checkbox" id="live"> Live typing (updates the OLED as you type)</label>
+  <button onclick="sendMsgNow()">Show on DeskBuddy</button>
+  <div class="small">Short text (40 chars) is shown big, longer text is small and pages automatically. English letters only: accents are simplified, emoji and other scripts are dropped.</div>
+</div>
+
+<div class="card">
+  <h2>Voice chat</h2>
+  <button id="mic" onclick="toggleVoice()">&#127908;</button>
+  <div id="vstate">Tap the mic and talk</div>
+  <div id="heard"></div>
+  <div id="reply"></div>
+  <select id="lang">
+    <option value="en-IN">English (India)</option>
+    <option value="en-US">English (US)</option>
+    <option value="en-GB">English (UK)</option>
+    <option value="hi-IN">Hindi</option>
+    <option value="kn-IN">Kannada</option>
+  </select>
+  <label class="chk"><input type="checkbox" id="speak" checked> Speak the reply out loud</label>
+  <label class="chk"><input type="checkbox" id="showreply" checked> Show the reply text on the OLED afterwards</label>
+  <input id="api" placeholder="Optional AI endpoint URL (POST {text} -> {reply})">
+  <div class="small">While you talk, the eyes listen (bouncing bars), then think (?), then talk (moving mouth). Tap the OLED touch pad (double tap) to cancel.
+  Built-in replies: time, date, weather, jokes, "open dino", "play music", "be happy"... Add an endpoint above to chat with a real AI.</div>
+</div>
+
+<div class="card">
+  <h2>Music (control it from the OLED)</h2>
+  <input type="file" id="files" accept="audio/*" multiple>
+  <div id="tracks" class="small">Pick songs from your phone. On the OLED: long press &rarr; Music.</div>
+  <div class="row">
+    <button class="alt" onclick="prevTrack()">&#9198;</button>
+    <button onclick="togglePlay()" id="pp">&#9654;</button>
+    <button class="alt" onclick="nextTrack()">&#9197;</button>
+  </div>
+  <input type="range" id="vol" min="0" max="100" value="50" oninput="setVol(+this.value)">
+  <div class="small">The songs play in this page, so keep it open (Chrome can keep playing with the screen off).</div>
+</div>
+
+<div class="card">
+  <h2>Remote (works like the touch pad)</h2>
+  <div id="pad">TOUCH PAD</div>
+  <div class="small" style="margin-bottom:8px">Tap / double tap / hold exactly like the real pad. Jet: hold = up.</div>
+  <div class="grid">
+    <button class="alt" onclick="app(11)">Face</button>
+    <button class="alt" onclick="app(10)">Menu</button>
+    <button onclick="app(0)">Dino</button>
+    <button onclick="app(1)">Jet</button>
+    <button onclick="app(2)">Music</button>
+    <button onclick="app(3)">Text</button>
+    <button class="alt" onclick="app(4)">Time</button>
+    <button class="alt" onclick="app(5)">Temp</button>
+    <button class="alt" onclick="app(6)">Weather</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Weather location</h2>
   <input id="city" placeholder="City" value="Bengaluru">
   <button onclick="syncAll()">Sync time and weather now</button>
   <div id="wx" style="margin-top:8px"></div>
 </div>
 
 <div class="card">
-  <b>Test an emotion</b>
+  <h2>Test an emotion</h2>
   <select id="em"></select>
   <button class="alt" onclick="sendEmotion()">Show on DeskBuddy</button>
 </div>
 
-<div class="card"><b>Log</b><div id="log"></div></div>
+<div class="card"><h2>Log</h2><div id="log"></div></div>
 
-<p style="font-size:13px;color:#8ab4e8">
+<p class="small">
 Keep this page open in Chrome. DeskBuddy keeps its own clock and the last weather between syncs,
 and this page re-sends everything every 10 minutes while connected.
 </p>
@@ -48,21 +136,29 @@ and this page re-sends everything every 10 minutes while connected.
 <script>
 var NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 var RXC = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
-var NAMES = ['Happy','Love','Blush','Shy','Cold','Hot','Snow','Windy','Surprised','Sleepy','Sad','Crying','Wink','Excited','Dizzy','Suspicious','Laugh','Thinking','Music','Cool','Annoyed','Angry','Furious','Grumpy','Idle'];
-var dev = null, rx = null, timer = null, retrying = false;
+var TXC = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+var NAMES = ['Happy','Love','Blush','Shy','Cold','Hot','Snow','Windy','Surprised','Sleepy','Sad','Crying','Wink','Excited','Dizzy','Suspicious','Laugh','Thinking','Music','Cool','Stars','Robot','Tired','Evil','Cat','Wow','Annoyed','Angry','Furious','Grumpy','Idle'];
+var dev = null, rx = null, tx = null, timer = null, retrying = false;
+var lastWx = '';
 
 function $(i){return document.getElementById(i)}
 function log(m){var l=$('log');l.textContent=new Date().toLocaleTimeString()+'  '+m+'\n'+l.textContent}
 function setStatus(m,on){$('status').textContent=m;$('dot').className='dot'+(on?' on':'')}
 function sleep(ms){return new Promise(function(r){setTimeout(r,ms)})}
+function connected(){return !!(dev && dev.gatt && dev.gatt.connected && rx)}
 
 (function init(){
   var sel=$('em');
   NAMES.forEach(function(n,i){var o=document.createElement('option');o.value=i;o.textContent=i+' - '+n;sel.appendChild(o)});
   var c=localStorage.getItem('db_city'); if(c)$('city').value=c;
+  var lg=localStorage.getItem('db_lang'); if(lg)$('lang').value=lg;
+  var ap=localStorage.getItem('db_api'); if(ap)$('api').value=ap;
+  $('lang').onchange=function(){localStorage.setItem('db_lang',this.value)};
+  $('api').onchange=function(){localStorage.setItem('db_api',this.value.trim())};
   if(!navigator.bluetooth){setStatus('This browser has no Web Bluetooth. Use Chrome.',false)}
 })();
 
+/* ---------------- connection ---------------- */
 async function connectBuddy(all){
   try{
     var opts = all ? {acceptAllDevices:true,optionalServices:[NUS]}
@@ -78,16 +174,24 @@ async function openLink(){
   var srv = await dev.gatt.connect();
   var svc = await srv.getPrimaryService(NUS);
   rx = await svc.getCharacteristic(RXC);
+  try{
+    tx = await svc.getCharacteristic(TXC);
+    await tx.startNotifications();
+    tx.addEventListener('characteristicvaluechanged', onTx);
+  }catch(e){ log('Notifications off: '+e.message); }
   setStatus('Connected to '+dev.name,true);
   log('Connected');
   await syncAll();
+  pushMusicState(true);
   clearInterval(timer);
-  timer = setInterval(function(){ if(dev && dev.gatt.connected) syncAll(); }, 10*60*1000);
+  timer = setInterval(function(){ if(connected()) syncAll(); }, 10*60*1000);
 }
 
 function onDisc(){
   setStatus('Disconnected - reconnecting...',false);
   log('Disconnected');
+  q.length = 0;
+  cancelVoice(true);
   retry();
 }
 
@@ -102,12 +206,80 @@ async function retry(){
   setStatus('Gave up. Press Connect.',false);
 }
 
-async function send(s){
-  if(!rx) throw new Error('not connected');
-  await rx.writeValue(new TextEncoder().encode(s));
-  await sleep(80);
+/* ---------------- write queue (BLE allows one write at a time) ---------------- */
+var q = [], busy = false;
+function enqueue(s, noResp, gap){
+  return new Promise(function(res,rej){
+    if(!connected()){ rej(new Error('not connected')); return; }
+    q.push({s:s,nr:noResp,gap:gap,res:res,rej:rej});
+    pump();
+  });
+}
+async function pump(){
+  if(busy) return;
+  busy = true;
+  while(q.length){
+    var j = q.shift();
+    try{
+      var b = new TextEncoder().encode(j.s);
+      if(j.nr && rx.writeValueWithoutResponse) await rx.writeValueWithoutResponse(b);
+      else await rx.writeValue(b);
+      if(j.gap) await sleep(j.gap);
+      j.res();
+    }catch(e){ j.rej(e); }
+  }
+  busy = false;
+}
+function send(s){ return enqueue(s,false,60); }
+function sendNR(s){ return enqueue(s,true,0); }
+function quiet(p){ p.catch(function(){}); }
+
+/* ---------------- text to the OLED ---------------- */
+function clean(s){
+  s = String(s)
+    .replace(/[‘’]/g,"'").replace(/[“”]/g,'"')
+    .replace(/[–—]/g,'-').replace(/…/g,'...');
+  try{ s = s.normalize('NFD').replace(/[̀-ͯ]/g,''); }catch(e){}
+  try{ s = s.replace(/[\u{1F000}-\u{1FFFF}☀-➿️‍]/gu,''); }catch(e){}
+  s = s.replace(/[\r\n\t]+/g,' ').replace(/[^\x20-\x7E]/g,'?');
+  return s.replace(/ {2,}/g,' ').trim();
 }
 
+/* Each kind ('M' message, 'N' title) has its own sender. Latest text wins while one is in flight. */
+function makeSender(kind,max){
+  var sending=false, pending=null;
+  async function sendText(text){
+    text = clean(text).slice(0,max);
+    var parts=[];
+    for(var i=0;i<text.length;i+=14) parts.push(text.substr(i,14));
+    if(!parts.length) parts=[''];
+    for(var k=0;k<parts.length;k++) await send(kind+(k?'1':'0')+','+parts[k]);
+    await send(kind+'2');
+  }
+  return async function go(text){
+    if(sending){ pending=text; return; }
+    sending=true;
+    try{ await sendText(text); }catch(e){ log('Send failed: '+e.message); }
+    sending=false;
+    if(pending!==null){ var n=pending; pending=null; go(n); }
+  };
+}
+var sendMsg = makeSender('M',240);
+var sendTitle = makeSender('N',60);
+
+function sendMsgNow(){
+  var t=$('msg').value;
+  if(!clean(t)){ log('Type something first'); return; }
+  sendMsg(t); log('Message sent');
+}
+var liveTimer=null;
+$('msg').addEventListener('input',function(){
+  if(!$('live').checked) return;
+  clearTimeout(liveTimer);
+  liveTimer=setTimeout(function(){ if(connected() && clean($('msg').value)) sendMsg($('msg').value); },600);
+});
+
+/* ---------------- time + weather ---------------- */
 async function getWeather(city){
   var key='db_geo_'+city.toLowerCase(), geo=localStorage.getItem(key);
   if(geo){geo=JSON.parse(geo)}
@@ -139,7 +311,8 @@ async function syncAll(){
     for(var i=1;i<=3;i++){
       await send('D,'+i+','+d.weather_code[i]+','+R(d.temperature_2m_max[i]));
     }
-    $('wx').textContent=city+': '+R(c.temperature_2m)+'\u00B0C (feels '+R(c.apparent_temperature)+'), humidity '+R(c.relative_humidity_2m)+'%, wind '+R(c.wind_speed_10m)+' km/h';
+    lastWx = 'In '+city+' it is '+R(c.temperature_2m)+' degrees, feels like '+R(c.apparent_temperature)+', humidity '+R(c.relative_humidity_2m)+' percent.';
+    $('wx').textContent=city+': '+R(c.temperature_2m)+'°C (feels '+R(c.apparent_temperature)+'), humidity '+R(c.relative_humidity_2m)+'%, wind '+R(c.wind_speed_10m)+' km/h';
     log('Weather sent');
   }catch(e){ log('Sync failed: '+e.message); }
 }
@@ -148,6 +321,228 @@ async function sendEmotion(){
   try{ await send('E,'+$('em').value); log('Emotion sent'); }
   catch(e){ log('Send failed: '+e.message); }
 }
+
+/* ---------------- remote pad + app buttons ---------------- */
+function app(n){ quiet(send('S,'+n)); }
+(function(){
+  var pad=$('pad'), down=false;
+  function press(on){
+    if(on===down) return;
+    down=on; pad.className=on?'down':'';
+    quiet(sendNR('K,'+(on?1:0)));
+  }
+  pad.addEventListener('pointerdown',function(e){ try{pad.setPointerCapture(e.pointerId)}catch(x){} press(true); e.preventDefault(); });
+  ['pointerup','pointercancel','lostpointercapture'].forEach(function(n){ pad.addEventListener(n,function(){ press(false); }); });
+  pad.addEventListener('contextmenu',function(e){e.preventDefault()});
+  document.addEventListener('visibilitychange',function(){ if(document.hidden) press(false); });
+  window.addEventListener('blur',function(){ press(false); });
+})();
+
+/* ---------------- music player (the OLED is its remote) ---------------- */
+var tracks=[], cur=-1, audio=new Audio(), vol=50;
+audio.preload='auto';
+audio.volume=vol/100;
+
+$('files').onchange=function(e){
+  tracks=Array.from(e.target.files).map(function(f){return {name:f.name.replace(/\.[^.]+$/,''),url:URL.createObjectURL(f)}});
+  renderTracks();
+  if(tracks.length) playIdx(0);
+};
+function renderTracks(){
+  var t=$('tracks'); t.innerHTML='';
+  tracks.forEach(function(k,i){
+    var d=document.createElement('div'); d.textContent=(i+1)+'. '+k.name; if(i===cur)d.className='cur';
+    d.onclick=function(){playIdx(i)}; t.appendChild(d);
+  });
+  if(!tracks.length) t.textContent='Pick songs from your phone. On the OLED: long press -> Music.';
+}
+function playIdx(i){
+  if(!tracks.length) return;
+  cur=(i+tracks.length)%tracks.length;
+  audio.src=tracks[cur].url;
+  audio.play().catch(function(e){log('Play blocked: '+e.message)});
+  renderTracks();
+  announceTrack();
+}
+function announceTrack(){
+  var name=cur>=0?tracks[cur].name:'';
+  if(connected()) sendTitle(name);
+  if('mediaSession' in navigator && cur>=0){
+    try{ navigator.mediaSession.metadata=new MediaMetadata({title:name,artist:'DeskBuddy'}); }catch(e){}
+  }
+}
+function togglePlay(){
+  if(!tracks.length){ log('Pick songs first'); return; }
+  if(audio.paused) audio.play().catch(function(e){log('Play blocked: '+e.message)}); else audio.pause();
+}
+function nextTrack(){ playIdx(cur+1); }
+function prevTrack(){ if(audio.currentTime>3) audio.currentTime=0; else playIdx(cur-1); }
+function setVol(v){
+  vol=Math.max(0,Math.min(100,v)); audio.volume=vol/100; $('vol').value=vol; pushMusicState();
+}
+function pushMusicState(withTitle){
+  if(!connected()) return;
+  quiet(send('A,'+(audio.paused?0:1)+','+vol));
+  if(withTitle && cur>=0) sendTitle(tracks[cur].name);
+}
+audio.addEventListener('play',function(){ $('pp').innerHTML='&#10074;&#10074;'; pushMusicState(); });
+audio.addEventListener('pause',function(){ $('pp').innerHTML='&#9654;'; pushMusicState(); });
+audio.addEventListener('ended',nextTrack);
+if('mediaSession' in navigator){
+  [['play',function(){audio.play()}],['pause',function(){audio.pause()}],['nexttrack',nextTrack],['previoustrack',prevTrack]].forEach(function(a){
+    try{ navigator.mediaSession.setActionHandler(a[0],a[1]); }catch(e){}
+  });
+}
+
+/* OLED -> phone */
+function onTx(ev){
+  var s=new TextDecoder().decode(ev.target.value).trim();
+  log('OLED: '+s);
+  var p=s.split(',');
+  if(p[0]==='P'){
+    if(p[1]==='p') togglePlay();
+    else if(p[1]==='n') nextTrack();
+    else if(p[1]==='b') prevTrack();
+    else if(p[1]==='+') setVol(vol+10);
+    else if(p[1]==='-') setVol(vol-10);
+  } else if(p[0]==='V' && p[1]==='x'){
+    cancelVoice(false);
+  }
+}
+
+/* ---------------- voice chat ---------------- */
+var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+var rec=null, vState=0, vToken=0, heardText='', finalText='';
+var VNAMES=['Tap the mic and talk','Listening...','Thinking...','Talking...'];
+var VCLS=['','l','t','s'];
+
+function setV(n){
+  vState=n;
+  $('vstate').textContent=VNAMES[n];
+  $('mic').className=VCLS[n];
+  quiet(sendNR('V,'+n));
+}
+
+function toggleVoice(){
+  if(vState===1 && rec){ try{rec.stop()}catch(e){} return; }   // done talking -> think now
+  if(vState!==0){ cancelVoice(false); return; }
+  startVoice();
+}
+
+function startVoice(){
+  if(!SR){ log('Speech recognition is not supported here. Use Chrome on Android.'); $('vstate').textContent='Voice not supported in this browser'; return; }
+  try{ speechSynthesis.cancel(); }catch(e){}
+  heardText=''; finalText=''; $('heard').textContent=''; $('reply').textContent='';
+  var my=++vToken;
+  var r=new SR(); rec=r;
+  r.lang=$('lang').value; r.interimResults=true; r.continuous=false; r.maxAlternatives=1;
+  r.onstart=function(){ if(my===vToken && vState!==1) setV(1); };
+  r.onresult=function(e){
+    var s='', fin=false;
+    for(var i=0;i<e.results.length;i++){ s+=e.results[i][0].transcript; if(e.results[i].isFinal) fin=true; }
+    heardText=s; if(fin) finalText=s;
+    $('heard').textContent='You: '+s;
+  };
+  r.onerror=function(e){ log('Voice error: '+e.error); };
+  r.onend=function(){
+    if(my!==vToken) return;
+    rec=null;
+    var t=(finalText||heardText).trim();
+    if(t) handleHeard(t,my); else setV(0);
+  };
+  setV(1);   // react right away, do not wait for the recogniser
+  try{ r.start(); }catch(e){ log('Could not start: '+e.message); setV(0); }
+}
+
+function cancelVoice(silent){
+  vToken++;
+  if(rec){ try{rec.abort()}catch(e){} rec=null; }
+  try{ speechSynthesis.cancel(); }catch(e){}
+  if(vState!==0){
+    vState=0; $('vstate').textContent=VNAMES[0]; $('mic').className='';
+    if(!silent) quiet(sendNR('V,0'));
+  }
+}
+
+var afterVoice=null;
+async function handleHeard(text,my){
+  afterVoice=null;
+  setV(2);
+  var reply;
+  try{ reply=await getReply(text); }catch(e){ reply='Sorry, something went wrong.'; }
+  if(my!==vToken) return;
+  $('reply').textContent='DeskBuddy: '+reply;
+  setV(3);
+  await speakAsync(reply,my);
+  if(my!==vToken) return;
+  setV(0);
+  if(afterVoice){ var f=afterVoice; afterVoice=null; await sleep(150); f(); }   // open app / change face once the voice animation is over
+  else if($('showreply').checked && connected()) sendMsg(reply);
+}
+
+function speakAsync(text,my){
+  return new Promise(function(res){
+    var done=false;
+    function fin(){ if(!done){done=true;res();} }
+    var ms=Math.min(6000,Math.max(1500,text.length*65));
+    if($('speak').checked && 'speechSynthesis' in window){
+      try{
+        var u=new SpeechSynthesisUtterance(text);
+        u.lang=$('lang').value;
+        u.onend=fin; u.onerror=fin;
+        speechSynthesis.speak(u);
+        setTimeout(fin,30000);
+        return;
+      }catch(e){}
+    }
+    setTimeout(fin,ms);
+  });
+}
+
+var JOKES=['Why do robots never panic? They have nerves of steel.','I told my computer I needed a break. It said: no problem, I will go to sleep.','Why was the chip so calm? It had good circuits.','I would tell you a UDP joke, but you might not get it.'];
+
+async function getReply(t){
+  var u=$('api').value.trim();
+  if(u){
+    try{
+      var r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})});
+      var j=await r.json();
+      if(j && j.reply) return String(j.reply);
+    }catch(e){ log('AI endpoint failed: '+e.message); }
+  }
+  return localReply(t);
+}
+
+function localReply(t){
+  var s=t.toLowerCase();
+  var m=s.match(/\b(open|show|launch|start|play)\s+(the\s+)?(dino|dinosaur|jet|space|fighter|game|menu|text|message|time|temperature|temp|weather|music)\b/);
+  if(m){
+    var w=m[3], map={dino:0,dinosaur:0,jet:1,space:1,fighter:1,game:0,music:2,text:3,message:3,time:4,temp:5,temperature:5,weather:6,menu:10};
+    if(!(m[1]==='play' && w==='music')){
+      afterVoice=function(){app(map[w])}; return 'Opening '+w+'.';
+    }
+  }
+  if(/\b(pause|stop)\b.*\b(music|song)\b|\bpause\b/.test(s)){ if(!audio.paused) audio.pause(); return 'Paused.'; }
+  if(/\b(play|resume)\b.*\b(music|song)\b/.test(s)){ togglePlayOn(); return 'Playing.'; }
+  if(/\bnext\b/.test(s)){ nextTrack(); return 'Next song.'; }
+  if(/\b(previous|last song|go back)\b/.test(s)){ prevTrack(); return 'Previous song.'; }
+  if(/\bvolume up\b|\blouder\b/.test(s)){ setVol(vol+20); return 'Louder.'; }
+  if(/\bvolume down\b|\bquieter\b/.test(s)){ setVol(vol-20); return 'Quieter.'; }
+  if(/\b(be|feel|look|act|show me|make)\b/.test(s)){
+    for(var i=0;i<NAMES.length;i++){
+      if(new RegExp('\\b'+NAMES[i].toLowerCase()+'\\b').test(s)){ (function(n){ afterVoice=function(){ quiet(send('E,'+n)); }; })(i); return 'Okay, '+NAMES[i].toLowerCase()+'!'; }
+    }
+  }
+  if(/\btime\b/.test(s)) return 'It is '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})+'.';
+  if(/\b(date|day|today)\b/.test(s)) return 'Today is '+new Date().toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'})+'.';
+  if(/\b(weather|temperature|hot|cold|rain)\b/.test(s)) return lastWx || 'I do not have the weather yet. Press sync first.';
+  if(/\bjoke\b/.test(s)) return JOKES[Math.floor(Math.random()*JOKES.length)];
+  if(/\b(hello|hi|hey)\b/.test(s)) return 'Hey! I am DeskBuddy.';
+  if(/\b(thank|thanks)\b/.test(s)) return 'Anytime!';
+  if(/\b(who are you|your name)\b/.test(s)) return 'I am DeskBuddy, your desk friend.';
+  return 'I heard: '+t+'. Add an AI endpoint to chat properly.';
+}
+function togglePlayOn(){ if(!tracks.length){ log('Pick songs first'); return; } if(audio.paused) audio.play().catch(function(){}); }
 </script>
 </body>
 </html>
